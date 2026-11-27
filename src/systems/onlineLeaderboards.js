@@ -1,35 +1,56 @@
 /**
  * Online Leaderboards System
  *
- * Integrates with Dreamlo API for global leaderboards.
+ * Reads global leaderboards from Dreamlo using its read-only public codes.
  * Provides async submission and retrieval with caching.
  *
- * SECURITY LIMITATIONS (Accepted for casual browser game):
- * - Private API key is exposed in client-side code (anyone can view source)
- * - No server-side validation (scores can be spoofed via direct API calls)
- * - Client-side validation only (basic sanity checks, easily bypassed)
+ * Dreamlo's private (write) codes must never ship in this client: anyone who
+ * has one can add, delete, or clear every score on that board. Score writes
+ * go to a server-side endpoint instead (VITE_LEADERBOARD_SUBMIT_URL), which
+ * holds the private codes, validates the run, and forwards it to Dreamlo.
+ * When no endpoint is configured, online submission is disabled.
  *
- * For a competitive game, these would need:
- * - Server-side proxy to hide API keys
- * - Server-side score validation
- * - Anti-cheat measures
+ * Submit endpoint contract: POST, Content-Type application/json, body
+ * { board: 'allTime'|'daily', name, score, floor, character, time, date }.
+ * Any 2xx response is treated as accepted.
  */
 
-// Dreamlo API configuration - Two leaderboards
+// Dreamlo public (read-only) codes - Two leaderboards
 const LEADERBOARDS = {
     allTime: {
-        publicKey: '696eba6f8f40bb1184b6c60f',
-        privateKey: 'YRU5IdY0w0uJvRF8cb9S1A21WwOAek3kyr3RcOYHbdYA'
+        publicKey: '696eba6f8f40bb1184b6c60f'
     },
     daily: {
-        publicKey: '696ff2ee8f40bb1184b8cc92',
-        privateKey: 'SgdqIaI_fkWUlRVwoWLQlA1yEXBc-33UKZYWPWJcOX6Q'
+        publicKey: '696ff2ee8f40bb1184b8cc92'
     }
 };
+
+const SCORE_SUBMIT_URL = resolveSubmitUrl(import.meta.env?.VITE_LEADERBOARD_SUBMIT_URL);
+
+/**
+ * Accept only an absolute HTTPS submit endpoint (or HTTP on localhost for development)
+ * @param {string|undefined} value - Configured endpoint
+ * @returns {string|null} - Endpoint URL, or null when online submission is disabled
+ */
+function resolveSubmitUrl(value) {
+    if (!value) return null;
+    try {
+        const url = new URL(value);
+        const isLocal = url.hostname === 'localhost' || url.hostname === '127.0.0.1';
+        if (url.protocol === 'https:' || (url.protocol === 'http:' && isLocal)) {
+            return url.toString();
+        }
+    } catch {
+        // invalid URL
+    }
+    console.warn('[OnlineLeaderboards] Ignoring invalid VITE_LEADERBOARD_SUBMIT_URL');
+    return null;
+}
 
 // IMPORTANT: Dreamlo free tier only supports HTTP, not HTTPS.
 // Since the game is deployed on HTTPS (GitHub Pages), we need a CORS proxy.
 // The proxy routes: HTTPS (our game) -> Proxy -> HTTP (Dreamlo)
+// Only public, read-only requests may go through it; it sees every URL it relays.
 //
 // Current proxy: corsproxy.io (free, public, browser-only)
 // For production, consider: Cloudflare Workers, Vercel Edge Functions, or Dreamlo paid tier
@@ -84,15 +105,16 @@ function isValidScore(score) {
 /**
  * Fetch with timeout
  * @param {string} url - URL to fetch
+ * @param {Object} options - fetch options
  * @param {number} timeout - Timeout in ms
  * @returns {Promise<Response>}
  */
-async function fetchWithTimeout(url, timeout = REQUEST_TIMEOUT_MS) {
+async function fetchWithTimeout(url, options = {}, timeout = REQUEST_TIMEOUT_MS) {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeout);
 
     try {
-        const response = await fetch(url, { signal: controller.signal });
+        const response = await fetch(url, { ...options, signal: controller.signal });
         clearTimeout(timeoutId);
         return response;
     } catch (error) {
@@ -127,20 +149,28 @@ export async function submitOnlineScore(entry, boardType = 'allTime') {
             return false;
         }
 
-        const name = sanitizeName(entry.name);
-        const score = Math.floor(entry.score);
-        const seconds = Math.floor(entry.time || 0);
+        if (!SCORE_SUBMIT_URL) {
+            console.log('[OnlineLeaderboards] Online score submission is not configured, skipping');
+            return false;
+        }
 
-        // Extra data: floor|character|date (pipe-delimited)
-        const text = `${entry.floor || 1}|${entry.character || 'unknown'}|${entry.date || ''}`;
+        const payload = {
+            board: boardType,
+            name: sanitizeName(entry.name),
+            score: Math.floor(entry.score),
+            floor: Math.floor(entry.floor || 1),
+            character: String(entry.character || 'unknown'),
+            time: Math.floor(entry.time || 0),
+            date: String(entry.date || '')
+        };
 
-        // Dreamlo add URL format: /lb/{privateKey}/add/{name}/{score}/{seconds}/{text}
-        const path = `/${board.privateKey}/add/${encodeURIComponent(name)}/${score}/${seconds}/${encodeURIComponent(text)}`;
-        const url = buildProxiedUrl(path);
+        console.log(`[OnlineLeaderboards] Submitting score to ${boardType}:`, { name: payload.name, score: payload.score, floor: payload.floor });
 
-        console.log(`[OnlineLeaderboards] Submitting score to ${boardType}:`, { name, score, floor: entry.floor });
-
-        const response = await fetchWithTimeout(url);
+        const response = await fetchWithTimeout(SCORE_SUBMIT_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
 
         if (response.ok) {
             console.log(`[OnlineLeaderboards] Score submitted to ${boardType} successfully`);
