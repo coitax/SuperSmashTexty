@@ -15,9 +15,61 @@ import { createProjectile } from '../entities/projectile.js';
 import { getPermanentUpgradeLevel, addCurrency } from './metaProgression.js';
 import { ACHIEVEMENTS } from '../data/achievements.js';
 import { showMultiplayerAchievementToast, initToastSystem } from './toastNotifications.js';
+import { PERFORMANCE_CONFIG } from '../config/constants.js';
 
 // Debug flag - set to true to enable verbose multiplayer logging
 const MP_DEBUG = false;
+
+// Limits on game objects built from host messages. The peer can send any
+// number of spawn messages, so each kind gets both a live cap and a
+// per-second budget; anything beyond them is dropped.
+const HOST_SPAWN_LIMITS = {
+    enemies: PERFORMANCE_CONFIG.MAX_ENEMIES,
+    pickups: PERFORMANCE_CONFIG.MAX_PICKUPS,
+    projectiles: PERFORMANCE_CONFIG.MAX_PROJECTILES,
+    obstacles: PERFORMANCE_CONFIG.MAX_OBSTACLES,
+    effects: PERFORMANCE_CONFIG.MAX_NET_EFFECTS_PER_SECOND
+};
+const hostSpawnBudgets = new Map(); // kind -> { windowStart, used }
+
+/**
+ * Reserve room for `count` objects of `kind` requested by a network peer.
+ * Fails if `count` alone exceeds the limit or this second's budget is spent.
+ * @param {string} kind - Key of HOST_SPAWN_LIMITS
+ * @param {number} count - Number of objects about to be created
+ * @returns {boolean} True if the objects may be created
+ */
+export function takeHostSpawnBudget(kind, count = 1) {
+    const limit = HOST_SPAWN_LIMITS[kind];
+    if (limit === undefined || !Number.isFinite(count) || count < 0 || count > limit) return false;
+
+    const now = performance.now();
+    let budget = hostSpawnBudgets.get(kind);
+    if (!budget || now - budget.windowStart >= 1000) {
+        budget = { windowStart: now, used: 0 };
+        hostSpawnBudgets.set(kind, budget);
+    }
+    if (budget.used + count > limit) return false;
+    budget.used += count;
+    return true;
+}
+
+/**
+ * Whether a new network entity with `id` may be added to `map`.
+ * Refuses ids that are still live (so a reused id cannot dodge the cap) and
+ * refuses once `map` holds `limit` live entities.
+ */
+function canTrackNetEntity(map, id, limit) {
+    const existing = map.get(id);
+    if (existing && existing.exists()) return false;
+    if (map.size < limit) return true;
+
+    // Entities removed by a scene change can stay in the map; prune them
+    for (const [entityId, entity] of map) {
+        if (!entity || !entity.exists()) map.delete(entityId);
+    }
+    return map.size < limit;
+}
 
 // Multiplayer game state
 const mpGame = {
@@ -570,10 +622,14 @@ function setupClientHandlers() {
 
     // Handle entity spawn events
     onMessage('spawn_entity', (payload) => {
-        if (!mpGame.k) return; // Need kaplay instance
+        if (!mpGame.k || !payload) return; // Need kaplay instance
 
         // Host tells clients to spawn a new entity with full creation parameters
         if (payload.entityType === 'enemy') {
+            if (!takeHostSpawnBudget('enemies') ||
+                !canTrackNetEntity(mpGame.enemies, payload.id, HOST_SPAWN_LIMITS.enemies)) {
+                return;
+            }
             let enemy;
             if (payload.isBoss) {
                 // Create boss entity
@@ -601,6 +657,10 @@ function setupClientHandlers() {
             mpGame.enemies.set(payload.id, enemy);
             // Removed console.log for performance
         } else if (payload.entityType === 'xpPickup') {
+            if (!takeHostSpawnBudget('pickups') ||
+                !canTrackNetEntity(mpGame.pickups, payload.id, HOST_SPAWN_LIMITS.pickups)) {
+                return;
+            }
             const pickup = createXPPickup(
                 mpGame.k,
                 payload.x,
@@ -612,6 +672,10 @@ function setupClientHandlers() {
             mpGame.pickups.set(payload.id, pickup);
             // Removed console.log for performance
         } else if (payload.entityType === 'currencyPickup') {
+            if (!takeHostSpawnBudget('pickups') ||
+                !canTrackNetEntity(mpGame.pickups, payload.id, HOST_SPAWN_LIMITS.pickups)) {
+                return;
+            }
             const pickup = createCurrencyPickup(
                 mpGame.k,
                 payload.x,
@@ -628,7 +692,11 @@ function setupClientHandlers() {
 
     // Handle projectile spawn events
     onMessage('spawn_projectile', (payload) => {
-        if (!mpGame.k) return; // Need kaplay instance
+        if (!mpGame.k || !payload) return; // Need kaplay instance
+        if (!takeHostSpawnBudget('projectiles') ||
+            !canTrackNetEntity(mpGame.projectiles, payload.id, HOST_SPAWN_LIMITS.projectiles)) {
+            return;
+        }
 
         // Reconstruct direction vector
         const direction = mpGame.k.vec2(payload.directionX, payload.directionY);
@@ -662,7 +730,8 @@ function setupClientHandlers() {
 
     // Handle damage events
     onMessage('damage_dealt', (payload) => {
-        if (!mpGame.k) return; // Need kaplay instance
+        if (!mpGame.k || !payload) return; // Need kaplay instance
+        if (!takeHostSpawnBudget('effects')) return;
 
         // Show damage number at the hit location
         const damageText = mpGame.k.add([
@@ -768,23 +837,25 @@ function setupClientHandlers() {
                 }
 
                 // Show revival effect with HP percentage
-                const reviveHealthPercent = Math.round(revivePercent * 100);
-                const reviveEffect = mpGame.k.add([
-                    mpGame.k.text(`★ REVIVED (${reviveHealthPercent}% HP) ★`, { size: 16 }),
-                    mpGame.k.pos(player.pos.x, player.pos.y - 40),
-                    mpGame.k.anchor('center'),
-                    mpGame.k.color(100, 255, 100),
-                    mpGame.k.opacity(1), // Required for lifespan component
-                    mpGame.k.lifespan(2),
-                    mpGame.k.z(1000)
-                ]);
+                if (takeHostSpawnBudget('effects')) {
+                    const reviveHealthPercent = Math.round(revivePercent * 100);
+                    const reviveEffect = mpGame.k.add([
+                        mpGame.k.text(`★ REVIVED (${reviveHealthPercent}% HP) ★`, { size: 16 }),
+                        mpGame.k.pos(player.pos.x, player.pos.y - 40),
+                        mpGame.k.anchor('center'),
+                        mpGame.k.color(100, 255, 100),
+                        mpGame.k.opacity(1), // Required for lifespan component
+                        mpGame.k.lifespan(2),
+                        mpGame.k.z(1000)
+                    ]);
 
-                // Animate rising and fading
-                reviveEffect.onUpdate(() => {
-                    if (!reviveEffect.exists()) return; // Prevent crash on scene exit
-                    reviveEffect.pos.y -= 30 * mpGame.k.dt();
-                    reviveEffect.opacity -= 0.5 * mpGame.k.dt();
-                });
+                    // Animate rising and fading
+                    reviveEffect.onUpdate(() => {
+                        if (!reviveEffect.exists()) return; // Prevent crash on scene exit
+                        reviveEffect.pos.y -= 30 * mpGame.k.dt();
+                        reviveEffect.opacity -= 0.5 * mpGame.k.dt();
+                    });
+                }
 
                 // Restore visual state
                 player.opacity = 1;

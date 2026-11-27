@@ -211,6 +211,8 @@ export const PERFORMANCE_CONFIG = {
     MAX_PROJECTILES: 500,
     MAX_ENEMIES: 300, // Increased for 3x enemy count
     MAX_PICKUPS: 600, // Increased for 3x pickups
+    MAX_OBSTACLES: 64, // Room templates use far fewer; caps host obstacle lists
+    MAX_NET_EFFECTS_PER_SECOND: 300, // Host-triggered visual effects (damage numbers, emotes, etc.)
 };
 
 // =============================================================================
