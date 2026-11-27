@@ -172,10 +172,14 @@ function setupHostHandlers() {
 
     // Handle player death notifications from clients
     onMessage('player_death', (payload, fromPeerId) => {
-        if (MP_DEBUG) console.log('[Multiplayer] Received player death from client:', fromPeerId, 'slot:', payload.slotIndex);
+        // A client may only report its own death
+        const senderSlot = getSenderSlot(fromPeerId);
+        if (senderSlot === null || !payload || payload.slotIndex !== senderSlot) return;
+
+        if (MP_DEBUG) console.log('[Multiplayer] Received player death from client:', fromPeerId, 'slot:', senderSlot);
 
         // Mark player as dead on host
-        const player = mpGame.players.get(payload.slotIndex);
+        const player = mpGame.players.get(senderSlot);
         if (player && player.exists()) {
             player.isDead = true;
             player.canMove = false;
@@ -188,25 +192,32 @@ function setupHostHandlers() {
                 player.outline.opacity = 0.5;
             }
 
-            if (MP_DEBUG) console.log('[Multiplayer] Host marked player at slot', payload.slotIndex, 'as dead');
+            if (MP_DEBUG) console.log('[Multiplayer] Host marked player at slot', senderSlot, 'as dead');
 
             // Broadcast to all other clients
-            broadcast('player_death', { slotIndex: payload.slotIndex }, [fromPeerId]);
+            broadcast('player_death', { slotIndex: senderSlot }, [fromPeerId]);
         }
     });
 
     // Handle enemy death notifications from clients
     onMessage('enemy_death', (payload, fromPeerId) => {
+        if (getSenderSlot(fromPeerId) === null || !payload) return;
+
         if (MP_DEBUG) console.log('[Multiplayer] Received enemy death from client:', fromPeerId, 'entity:', payload.entityId);
 
-        // Broadcast the death to all clients (including back to the sender for confirmation)
-        broadcast('entity_destroyed', {
-            entityId: payload.entityId,
-            entityType: payload.entityType,
-            x: payload.x,
-            y: payload.y
-        });
+        // Client kills are only hints: enemy HP is host-authoritative, so the host's own
+        // simulation decides whether the enemy is gone. Pickups are never removed this way.
+        const entityId = Number(payload.entityId);
+        const enemy = mpGame.enemies.get(entityId);
+        if (!enemy || enemy.exists()) return;
 
+        mpGame.enemies.delete(entityId);
+        broadcast('entity_destroyed', {
+            entityId,
+            entityType: 'enemy',
+            x: Number(enemy.pos?.x) || 0,
+            y: Number(enemy.pos?.y) || 0
+        });
     });
 
     // Handle re-sync requests from clients
@@ -217,30 +228,39 @@ function setupHostHandlers() {
 
     // Handle level up queued from clients
     onMessage('level_up_queued', (payload, fromPeerId) => {
-        if (MP_DEBUG) console.log('[Multiplayer] Received level up queued from client:', fromPeerId, 'slot:', payload.slotIndex, 'level:', payload.level);
+        const senderSlot = getSenderSlot(fromPeerId);
+        if (senderSlot === null || !payload || payload.slotIndex !== senderSlot) return;
+
+        if (MP_DEBUG) console.log('[Multiplayer] Received level up queued from client:', fromPeerId, 'slot:', senderSlot, 'level:', payload.level);
 
         // Broadcast to ALL clients so everyone knows about the level up
         broadcast('level_up_queued', {
-            slotIndex: payload.slotIndex,
+            slotIndex: senderSlot,
             level: payload.level,
             timestamp: Date.now()
         });
 
-        if (MP_DEBUG) console.log('[Multiplayer] Host broadcasted level up queued for slot:', payload.slotIndex);
+        if (MP_DEBUG) console.log('[Multiplayer] Host broadcasted level up queued for slot:', senderSlot);
     });
 
     // Handle emote from clients - rebroadcast to all
     onMessage('player_emote', (payload, fromPeerId) => {
+        const senderSlot = getSenderSlot(fromPeerId);
+        if (senderSlot === null || !payload) return;
+
         // Rebroadcast emote to all clients (including sender for consistency)
-        broadcast('player_emote', payload);
+        broadcast('player_emote', { slotIndex: senderSlot, emoteType: payload.emoteType });
     });
 
     // Handle upgrade selection from clients
     onMessage('upgrade_selected', (payload, fromPeerId) => {
-        if (MP_DEBUG) console.log('[Multiplayer] Received upgrade selection from client:', fromPeerId, 'slot:', payload.slotIndex, 'upgrade:', payload.upgradeKey);
+        const senderSlot = getSenderSlot(fromPeerId);
+        if (senderSlot === null || !payload || payload.slotIndex !== senderSlot) return;
+
+        if (MP_DEBUG) console.log('[Multiplayer] Received upgrade selection from client:', fromPeerId, 'slot:', senderSlot, 'upgrade:', payload.upgradeKey);
 
         // Apply upgrade to the player on host side
-        const player = mpGame.players.get(payload.slotIndex);
+        const player = mpGame.players.get(senderSlot);
         if (player && player.exists()) {
             applyUpgrade(player, payload.upgradeKey);
             // Track the upgrade in upgradeStacks for proper persistence
@@ -254,39 +274,56 @@ function setupHostHandlers() {
 
         // Broadcast to ALL clients (including back to sender) so everyone can apply the upgrade
         broadcast('upgrade_selected', {
-            slotIndex: payload.slotIndex,
+            slotIndex: senderSlot,
             upgradeKey: payload.upgradeKey,
             timestamp: Date.now()
         });
 
-        if (MP_DEBUG) console.log('[Multiplayer] Host broadcasted upgrade selection for slot:', payload.slotIndex);
+        if (MP_DEBUG) console.log('[Multiplayer] Host broadcasted upgrade selection for slot:', senderSlot);
     });
 
     // Handle synergy activation from clients
     onMessage('synergy_activated', (payload, fromPeerId) => {
-        if (MP_DEBUG) console.log('[Multiplayer] Received synergy activation from client:', fromPeerId, 'slot:', payload.slotIndex);
+        const senderSlot = getSenderSlot(fromPeerId);
+        if (senderSlot === null || !payload || payload.slotIndex !== senderSlot) return;
+
+        if (MP_DEBUG) console.log('[Multiplayer] Received synergy activation from client:', fromPeerId, 'slot:', senderSlot);
 
         // Broadcast to ALL clients so everyone can apply the synergies
         broadcast('synergy_activated', {
-            slotIndex: payload.slotIndex,
+            slotIndex: senderSlot,
             synergies: payload.synergies,
             timestamp: Date.now()
         });
 
-        if (MP_DEBUG) console.log('[Multiplayer] Host broadcasted synergy activation for slot:', payload.slotIndex);
+        if (MP_DEBUG) console.log('[Multiplayer] Host broadcasted synergy activation for slot:', senderSlot);
     });
 
     // Handle achievement unlock from clients (rebroadcast to all)
     onMessage('achievement_unlocked', (payload, fromPeerId) => {
+        const senderSlot = getSenderSlot(fromPeerId);
+        if (senderSlot === null || !payload) return;
+
         if (MP_DEBUG) console.log('[Multiplayer] Received achievement unlock from client:', fromPeerId, 'achievement:', payload.achievementId);
 
         // Broadcast to ALL clients so everyone can show the toast
         broadcast('achievement_unlocked', {
             achievementId: payload.achievementId,
-            playerSlotIndex: payload.playerSlotIndex,
-            playerName: payload.playerName
+            playerSlotIndex: senderSlot,
+            playerName: getParty().slots[senderSlot]?.playerName || `Player ${senderSlot + 1}`
         });
     });
+}
+
+/**
+ * Resolve the party slot owned by the peer a message came from (host only).
+ * The slot is taken from the host's own peer-to-slot mapping, never from the payload.
+ * @param {string} fromPeerId - Peer ID of the sending connection
+ * @returns {number|null} The sender's slot index, or null if the peer holds no client slot
+ */
+function getSenderSlot(fromPeerId) {
+    const slotIndex = getParty().peerIdToSlot.get(fromPeerId);
+    return Number.isInteger(slotIndex) && slotIndex > 0 ? slotIndex : null;
 }
 
 // Flags to prevent duplicate handler registration
