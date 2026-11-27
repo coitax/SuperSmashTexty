@@ -15,6 +15,7 @@ import { createProjectile } from '../entities/projectile.js';
 import { getPermanentUpgradeLevel, addCurrency } from './metaProgression.js';
 import { ACHIEVEMENTS } from '../data/achievements.js';
 import { showMultiplayerAchievementToast, initToastSystem } from './toastNotifications.js';
+import { PICKUP_CONFIG } from '../config/constants.js';
 
 // Debug flag - set to true to enable verbose multiplayer logging
 const MP_DEBUG = false;
@@ -34,6 +35,9 @@ const mpGame = {
     enemies: new Map(), // Map of entityId -> enemy entity
     projectiles: new Map(), // Map of entityId -> projectile entity
     pickups: new Map(), // Map of entityId -> pickup entity
+    // Client only: entityId -> value of currency pickups the host spawned and has not yet credited.
+    // Values are copied from the spawn message so later changes to the entity cannot alter the credit.
+    creditableCurrencyPickups: new Map(),
     nextEntityId: 1, // Auto-incrementing ID for entities
     // Kaplay instance reference
     k: null,
@@ -46,6 +50,58 @@ const mpGame = {
     pendingXP: 0, // XP accumulated while player was in upgrade draft screen
     onGameSeedCallback: null // Callback for when game_seed is received (clients only)
 };
+
+// Client only: what this client has seen of the current run, one host message at a time.
+// Spans room scenes (initMultiplayerGame runs per room), reset with resetObservedRunStats().
+const observedRun = {
+    floorsReached: 1,
+    roomsCleared: 0,
+    enemiesSpawned: 0,
+    bossesSpawned: 0
+};
+
+export function resetObservedRunStats() {
+    observedRun.floorsReached = 1;
+    observedRun.roomsCleared = 0;
+    observedRun.enemiesSpawned = 0;
+    observedRun.bossesSpawned = 0;
+}
+
+/**
+ * Record a floor change announced by the host. A legitimate host advances one floor at a time,
+ * so each announcement counts as at most one floor regardless of the number it carries.
+ */
+export function noteObservedFloorAdvance() {
+    observedRun.floorsReached++;
+}
+
+export function noteObservedRoomCleared() {
+    observedRun.roomsCleared++;
+}
+
+function toCount(value) {
+    return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+}
+
+/**
+ * Clamp host-reported run stats to what this client observed during the run.
+ * @param {Object} hostRunStats - Run stats from the host's game_over message
+ * @returns {Object} Copy of hostRunStats with reward-bearing counters bounded
+ */
+export function boundHostRunStats(hostRunStats) {
+    const stats = hostRunStats && typeof hostRunStats === 'object' ? hostRunStats : {};
+    return {
+        ...stats,
+        floorsReached: Math.max(1, Math.min(toCount(stats.floorsReached), observedRun.floorsReached)),
+        roomsCleared: Math.min(toCount(stats.roomsCleared), observedRun.roomsCleared),
+        enemiesKilled: Math.min(toCount(stats.enemiesKilled), observedRun.enemiesSpawned),
+        bossesKilled: Math.min(toCount(stats.bossesKilled), observedRun.bossesSpawned)
+    };
+}
+
+function isValidCurrencyPickupValue(value) {
+    return Number.isInteger(value) && value >= 1 && value <= PICKUP_CONFIG.CURRENCY_MAX_VALUE;
+}
 
 /**
  * Initialize multiplayer game session
@@ -70,6 +126,7 @@ export function initMultiplayerGame(isHost, localSlot = 0, kaplayInstance = null
     mpGame.enemies.clear();
     mpGame.projectiles.clear();
     mpGame.pickups.clear();
+    mpGame.creditableCurrencyPickups.clear();
     mpGame.nextEntityId = 1;
 
     // Initialize seeded RNG
@@ -599,6 +656,10 @@ function setupClientHandlers() {
                 enemy.isBossMinion = true;
             }
             mpGame.enemies.set(payload.id, enemy);
+            observedRun.enemiesSpawned++;
+            if (payload.isBoss) {
+                observedRun.bossesSpawned++;
+            }
             // Removed console.log for performance
         } else if (payload.entityType === 'xpPickup') {
             const pickup = createXPPickup(
@@ -622,6 +683,11 @@ function setupClientHandlers() {
             pickup.mpEntityId = payload.id;
             pickup.pickupType = 'currency';
             mpGame.pickups.set(payload.id, pickup);
+            if (Number.isInteger(payload.id) && isValidCurrencyPickupValue(payload.value)) {
+                mpGame.creditableCurrencyPickups.set(payload.id, payload.value);
+            } else {
+                mpGame.creditableCurrencyPickups.delete(payload.id);
+            }
             // Removed console.log for performance
         }
     });
@@ -850,9 +916,15 @@ function setupClientHandlers() {
     });
 
     // Receive currency gain from host
+    // Only credits a currency pickup this client saw spawn, once, for the value it was spawned with
     onMessage('currency_gain', (payload) => {
-        if (MP_DEBUG) console.log('[Multiplayer] Received currency gain from host:', payload.value);
-        addCurrency(payload.value);
+        if (MP_DEBUG) console.log('[Multiplayer] Received currency gain from host:', payload?.id, payload?.value);
+        const pickupId = payload?.id;
+        if (!mpGame.creditableCurrencyPickups.has(pickupId)) return;
+        const value = mpGame.creditableCurrencyPickups.get(pickupId);
+        if (payload.value !== value) return;
+        mpGame.creditableCurrencyPickups.delete(pickupId);
+        addCurrency(value);
     });
 
     // Receive enemy split events from host
@@ -1358,6 +1430,7 @@ export function cleanupMultiplayer() {
     mpGame.enemies.clear();
     mpGame.projectiles.clear();
     mpGame.pickups.clear();
+    mpGame.creditableCurrencyPickups.clear();
 
     // Reset entity ID counter
     mpGame.nextEntityId = 1;
@@ -1949,11 +2022,13 @@ export function broadcastXPGain(xpValue) {
 /**
  * Broadcast currency gain to all clients (host only)
  * Called when currency is collected so all players gain currency
+ * @param {number} pickupId - Network entity ID of the collected currency pickup
+ * @param {number} currencyValue - Value of that pickup
  */
-export function broadcastCurrencyGain(currencyValue) {
+export function broadcastCurrencyGain(pickupId, currencyValue) {
     if (!mpGame.isHost) return;
 
-    broadcast('currency_gain', { value: currencyValue });
+    broadcast('currency_gain', { id: pickupId, value: currencyValue });
 }
 
 /**

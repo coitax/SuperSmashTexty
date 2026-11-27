@@ -49,7 +49,7 @@ import { createMinimap } from '../systems/minimap.js';
 import { renderFloorDecorations, getFloorTheme } from '../systems/floorTheming.js';
 import { POWERUP_WEAPONS, rollPowerupDrop, applyPowerupWeapon, getPowerupDisplay, updatePowerupWeapon, restoreOriginalWeapon } from '../systems/powerupWeapons.js';
 import { getParty, getPartySize } from '../systems/partySystem.js';
-import { initMultiplayerGame, registerPlayer, registerEnemy, updateMultiplayer, isMultiplayerActive, cleanupMultiplayer, getPlayerCount, getRoomRNG, getFloorRNG, setCurrentFloor, setCurrentRoom, broadcastGameSeed, isHost, broadcastPauseState, sendPauseRequest, broadcastDeathEvent, broadcastRoomCompletion, broadcastGameOver, broadcastXPGain, broadcastCurrencyGain, broadcastPlayerDeath, broadcastRoomTransition, sendEnemyDeath, broadcastPowerupWeaponApplied, broadcastLevelUpQueued, broadcastHostQuit, getAndClearPendingXP, broadcastEmote, getFirstRoomTemplateKey, hasGameSeed, onGameSeedReceived, broadcastObstacles, broadcastHealEvent, broadcastRevivalEvent } from '../systems/multiplayerGame.js';
+import { initMultiplayerGame, registerPlayer, registerEnemy, updateMultiplayer, isMultiplayerActive, cleanupMultiplayer, getPlayerCount, getRoomRNG, getFloorRNG, setCurrentFloor, setCurrentRoom, broadcastGameSeed, isHost, broadcastPauseState, sendPauseRequest, broadcastDeathEvent, broadcastRoomCompletion, broadcastGameOver, broadcastXPGain, broadcastCurrencyGain, broadcastPlayerDeath, broadcastRoomTransition, sendEnemyDeath, broadcastPowerupWeaponApplied, broadcastLevelUpQueued, broadcastHostQuit, getAndClearPendingXP, broadcastEmote, getFirstRoomTemplateKey, hasGameSeed, onGameSeedReceived, broadcastObstacles, broadcastHealEvent, broadcastRevivalEvent, resetObservedRunStats, noteObservedFloorAdvance, noteObservedRoomCleared, boundHostRunStats } from '../systems/multiplayerGame.js';
 import { onMessage, offMessage, getNetworkInfo, broadcast } from '../systems/networkSystem.js';
 import { initInputSystem, initTouchControls } from '../systems/inputSystem.js';
 
@@ -309,6 +309,7 @@ export function setupGameScene(k) {
                 killsByType: {},
                 startTime: Date.now() // Track run start time
             };
+            resetObservedRunStats();
 
             // Initialize achievement checker for new run (clears previous run's achievements)
             initAchievementChecker(k);
@@ -961,6 +962,7 @@ export function setupGameScene(k) {
                     if (data.currentFloor && data.currentFloor !== gameState.currentFloor) {
                         console.log(`[Multiplayer] Floor advancement: ${gameState.currentFloor} -> ${data.currentFloor}`);
                         gameState.currentFloor = data.currentFloor;
+                        noteObservedFloorAdvance();
                         // Clear floor map so it regenerates for the new floor
                         gameState.floorMap = null;
                         gameState.entryDirection = null; // Start from center on new floor
@@ -983,6 +985,9 @@ export function setupGameScene(k) {
                 });
 
                 onMessage('room_completed', () => {
+                    if (!roomCompleted) {
+                        noteObservedRoomCleared();
+                    }
                     roomCompleted = true;
 
                     // Revive all dead players (same as host)
@@ -1080,13 +1085,18 @@ export function setupGameScene(k) {
 
                 // Listen for game over event from host
                 onMessage('game_over', (data) => {
-                    // Calculate currency earned (use host's value if provided)
-                    const currencyEarned = data.currencyEarned || calculateCurrencyEarned(data.runStats || runStats);
+                    // Use runStats from host (data.runStats) instead of local runStats (which is empty for clients),
+                    // bounded by what this client observed so the host cannot inflate the reward
+                    const boundedRunStats = boundHostRunStats(data?.runStats || runStats);
+                    const maxCurrencyEarned = calculateCurrencyEarned(boundedRunStats);
+                    const hostCurrencyEarned = data?.currencyEarned;
+                    const currencyEarned = Number.isInteger(hostCurrencyEarned) && hostCurrencyEarned > 0
+                        ? Math.min(hostCurrencyEarned, maxCurrencyEarned)
+                        : maxCurrencyEarned;
 
                     // Update persistent stats and add currency
-                    // Use runStats from host (data.runStats) instead of local runStats (which is empty for clients)
                     const fullRunStats = {
-                        ...(data.runStats || runStats),
+                        ...boundedRunStats,
                         level: player.level,
                         currencyEarned: currencyEarned
                     };
@@ -1101,7 +1111,7 @@ export function setupGameScene(k) {
 
                     // Go to game over scene
                     k.go('gameOver', {
-                        runStats: { ...(data.runStats || runStats) },
+                        runStats: { ...boundedRunStats },
                         currencyEarned: currencyEarned,
                         partyStats: data.partyStats || [],
                         isDailyRun: gameState.isDailyRun,
@@ -4033,7 +4043,7 @@ export function setupGameScene(k) {
 
                     // Broadcast currency gain to clients
                     if (isMultiplayerActive()) {
-                        broadcastCurrencyGain(pickup.value);
+                        broadcastCurrencyGain(pickup.mpEntityId, pickup.value);
                     }
 
                     pickup.isFlyingToUI = true;

@@ -185,6 +185,7 @@ export const PICKUP_CONFIG = {
 
     // Currency Pickups
     CURRENCY_LIFETIME: 15, // Seconds before currency despawns (longer than XP)
+    CURRENCY_MAX_VALUE: 25, // Largest value a single coin can carry; clients reject host credits above it
     CURRENCY_PULSE_SPEED: 4, // Speed of pulse animation
     CURRENCY_PULSE_AMOUNT: 0.15, // Amount of pulse scaling
     CURRENCY_COLOR: [255, 215, 0], // Gold
