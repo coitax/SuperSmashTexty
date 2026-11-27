@@ -8,6 +8,16 @@ import { generateInviteCode } from './nameGenerator.js';
 // Debug flag - set to true to enable verbose network logging
 const NET_DEBUG = false;
 
+const STUN_SERVERS = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun.relay.metered.ca:80' }
+];
+
+// Endpoint on a backend we control that mints short-lived TURN credentials.
+// It must not carry an API key or other secret: everything here ships to players.
+const TURN_CREDENTIALS_URL = (import.meta.env && import.meta.env.VITE_TURN_CREDENTIALS_URL) || '';
+const TURN_FETCH_TIMEOUT_MS = 5000;
+
 // Network state
 const network = {
     peer: null,              // Our Peer instance
@@ -52,118 +62,158 @@ export function initNetwork(inviteCode, isHost = true) {
         // Create peer with invite code as ID (for host) or random ID (for client)
         const peerId = isHost ? `smash-${inviteCode}` : undefined;
 
-        // Use PeerJS cloud service for all environments
-        const peerConfig = {
-            debug: 2,
-            // No host/port/path = uses PeerJS cloud service (0.peerjs.com)
-            config: {
-                iceServers: [
-                    // STUN servers for NAT discovery
-                    { urls: 'stun:stun.l.google.com:19302' },
-                    { urls: 'stun:stun.relay.metered.ca:80' },
-                    // TURN servers from Metered.ca free tier for relay fallback
-                    {
-                        urls: 'turn:global.relay.metered.ca:80',
-                        username: 'e7312c28f330eeb65ba0d000',
-                        credential: 'CWfp+/uh3V/hKus3'
-                    },
-                    {
-                        urls: 'turn:global.relay.metered.ca:80?transport=tcp',
-                        username: 'e7312c28f330eeb65ba0d000',
-                        credential: 'CWfp+/uh3V/hKus3'
-                    },
-                    {
-                        urls: 'turn:global.relay.metered.ca:443',
-                        username: 'e7312c28f330eeb65ba0d000',
-                        credential: 'CWfp+/uh3V/hKus3'
-                    },
-                    {
-                        urls: 'turns:global.relay.metered.ca:443?transport=tcp',
-                        username: 'e7312c28f330eeb65ba0d000',
-                        credential: 'CWfp+/uh3V/hKus3'
-                    }
-                ],
-                // Allow all ICE transport types for better connectivity
-                iceTransportPolicy: 'all',
-                // Bundle policy for better performance
-                bundlePolicy: 'max-bundle',
-                rtcpMuxPolicy: 'require'
-            }
-        };
-
-        try {
-            network.peer = new Peer(peerId, peerConfig);
-
-            network.peer.on('open', (id) => {
-                network.peerId = id;
-                network.isInitialized = true;
-
-                // For hosts, extract the 6-digit code from the peer ID (format: "smash-123456")
-                // For clients, just resolve with the full ID
-                const codeToReturn = (isHost && id.startsWith('smash-'))
-                    ? id.substring(6) // Extract "123456" from "smash-123456"
-                    : id;
-
-                resolve(codeToReturn);
-            });
-
-            network.peer.on('error', (err) => {
-                console.error('Peer error:', err);
-
-                // Handle unavailable-id error (peer ID already taken)
-                if (err.type === 'unavailable-id' && isHost) {
-                    console.warn('Peer ID already taken - generating new code and retrying...');
-
-                    // Fully cleanup the peer
-                    if (network.peer) {
-                        try {
-                            network.peer.destroy();
-                        } catch (e) {
-                            console.warn('Error destroying peer:', e);
-                        }
-                        network.peer = null;
-                        network.peerId = null;
-                        network.isInitialized = false;
-                    }
-
-                    // Wait a bit longer for cleanup to complete
-                    setTimeout(() => {
-                        // Generate a new invite code (just 6 digits, no prefix)
-                        const newCode = generateInviteCode();
-
-                        // Recursively call initNetwork with new code
-                        // This will create a NEW peer with `smash-${newCode}` format
-                        initNetwork(newCode, isHost).then(resolve).catch(reject);
-                    }, 2000); // Longer delay to ensure cleanup
-                    return;
-                }
-
-                // Provide user-friendly error messages
-                if (err.type === 'network') {
-                    console.warn('PeerJS server unavailable - multiplayer disabled');
-                } else if (err.type === 'peer-unavailable') {
-                    console.warn('Host not found - check invite code');
-                } else if (err.type === 'server-error') {
-                    console.warn('PeerJS server error - multiplayer may be unavailable');
-                }
-
-                if (!network.isInitialized) {
-                    reject(new Error(`Multiplayer unavailable: ${err.type || 'connection failed'}`));
-                }
-            });
-
-            // Host listens for incoming connections
-            if (isHost) {
-                network.peer.on('connection', (conn) => {
-                    handleIncomingConnection(conn);
-                });
-            }
-
-        } catch (err) {
-            console.error('Failed to create peer:', err);
-            reject(err);
-        }
+        getIceServers().then((iceServers) => {
+            createPeer(peerId, iceServers, isHost, resolve, reject);
+        });
     });
+}
+
+/**
+ * Build the ICE server list for a new peer.
+ * TURN credentials are never compiled into the client: when
+ * VITE_TURN_CREDENTIALS_URL is set, a short-lived TURN username/credential is
+ * fetched from that backend each time a peer is created. Without it (or if the
+ * fetch fails) only STUN is used.
+ * @returns {Promise<RTCIceServer[]>}
+ */
+async function getIceServers() {
+    const iceServers = [...STUN_SERVERS];
+    if (!TURN_CREDENTIALS_URL) return iceServers;
+
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), TURN_FETCH_TIMEOUT_MS) : null;
+    try {
+        const response = await fetch(TURN_CREDENTIALS_URL, {
+            cache: 'no-store',
+            credentials: 'omit',
+            signal: controller ? controller.signal : undefined
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        iceServers.push(...parseTurnServers(await response.json()));
+    } catch (err) {
+        console.warn('[NetworkSystem] Could not fetch TURN credentials - relay fallback disabled:', err && err.message);
+    } finally {
+        if (timer) clearTimeout(timer);
+    }
+    return iceServers;
+}
+
+/**
+ * Accepts `[RTCIceServer]`, `{ iceServers: [RTCIceServer] }` or
+ * `{ urls, username, credential }` and keeps only well-formed TURN entries.
+ */
+function parseTurnServers(body) {
+    let entries = [];
+    if (Array.isArray(body)) {
+        entries = body;
+    } else if (body && Array.isArray(body.iceServers)) {
+        entries = body.iceServers;
+    } else if (body && body.urls) {
+        entries = [{ urls: body.urls, username: body.username, credential: body.credential }];
+    }
+
+    const servers = [];
+    for (const entry of entries) {
+        if (!entry || typeof entry.username !== 'string' || typeof entry.credential !== 'string') continue;
+        const urls = (Array.isArray(entry.urls) ? entry.urls : [entry.urls])
+            .filter((url) => typeof url === 'string' && /^turns?:/i.test(url));
+        if (urls.length === 0 || !entry.username || !entry.credential) continue;
+        servers.push({
+            urls: urls.length === 1 ? urls[0] : urls,
+            username: entry.username,
+            credential: entry.credential
+        });
+    }
+    return servers;
+}
+
+function createPeer(peerId, iceServers, isHost, resolve, reject) {
+    // Use PeerJS cloud service for all environments
+    const peerConfig = {
+        debug: 2,
+        // No host/port/path = uses PeerJS cloud service (0.peerjs.com)
+        config: {
+            iceServers,
+            // Allow all ICE transport types for better connectivity
+            iceTransportPolicy: 'all',
+            // Bundle policy for better performance
+            bundlePolicy: 'max-bundle',
+            rtcpMuxPolicy: 'require'
+        }
+    };
+
+    try {
+        network.peer = new Peer(peerId, peerConfig);
+
+        network.peer.on('open', (id) => {
+            network.peerId = id;
+            network.isInitialized = true;
+
+            // For hosts, extract the 6-digit code from the peer ID (format: "smash-123456")
+            // For clients, just resolve with the full ID
+            const codeToReturn = (isHost && id.startsWith('smash-'))
+                ? id.substring(6) // Extract "123456" from "smash-123456"
+                : id;
+
+            resolve(codeToReturn);
+        });
+
+        network.peer.on('error', (err) => {
+            console.error('Peer error:', err);
+
+            // Handle unavailable-id error (peer ID already taken)
+            if (err.type === 'unavailable-id' && isHost) {
+                console.warn('Peer ID already taken - generating new code and retrying...');
+
+                // Fully cleanup the peer
+                if (network.peer) {
+                    try {
+                        network.peer.destroy();
+                    } catch (e) {
+                        console.warn('Error destroying peer:', e);
+                    }
+                    network.peer = null;
+                    network.peerId = null;
+                    network.isInitialized = false;
+                }
+
+                // Wait a bit longer for cleanup to complete
+                setTimeout(() => {
+                    // Generate a new invite code (just 6 digits, no prefix)
+                    const newCode = generateInviteCode();
+
+                    // Recursively call initNetwork with new code
+                    // This will create a NEW peer with `smash-${newCode}` format
+                    initNetwork(newCode, isHost).then(resolve).catch(reject);
+                }, 2000); // Longer delay to ensure cleanup
+                return;
+            }
+
+            // Provide user-friendly error messages
+            if (err.type === 'network') {
+                console.warn('PeerJS server unavailable - multiplayer disabled');
+            } else if (err.type === 'peer-unavailable') {
+                console.warn('Host not found - check invite code');
+            } else if (err.type === 'server-error') {
+                console.warn('PeerJS server error - multiplayer may be unavailable');
+            }
+
+            if (!network.isInitialized) {
+                reject(new Error(`Multiplayer unavailable: ${err.type || 'connection failed'}`));
+            }
+        });
+
+        // Host listens for incoming connections
+        if (isHost) {
+            network.peer.on('connection', (conn) => {
+                handleIncomingConnection(conn);
+            });
+        }
+
+    } catch (err) {
+        console.error('Failed to create peer:', err);
+        reject(err);
+    }
 }
 
 /**

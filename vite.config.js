@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite';
+import { defineConfig, loadEnv } from 'vite';
 import { execSync } from 'child_process';
 
 // ============================================================================
@@ -17,7 +17,25 @@ function getGitCommitCount() {
   }
 }
 
-export default defineConfig(({ command }) => {
+// VITE_TURN_CREDENTIALS_URL is compiled into the client, so it must point at a
+// backend that issues short-lived TURN credentials, never carry a secret itself.
+function assertNoSecretInTurnUrl(value) {
+  if (!value) return;
+  let url;
+  try {
+    url = new URL(value, 'http://relative.invalid');
+  } catch {
+    throw new Error('VITE_TURN_CREDENTIALS_URL is not a valid URL');
+  }
+  const secretParam = [...url.searchParams.keys()]
+    .find((name) => /key|secret|token|pass|cred|auth|sig/i.test(name));
+  if (url.username || url.password || secretParam) {
+    throw new Error('VITE_TURN_CREDENTIALS_URL must not embed credentials; issue short-lived TURN credentials from a backend instead');
+  }
+}
+
+export default defineConfig(({ command, mode }) => {
+  assertNoSecretInTurnUrl(loadEnv(mode, process.cwd(), 'VITE_').VITE_TURN_CREDENTIALS_URL);
   const commitCount = getGitCommitCount();
   // Use '/SuperSmashTexty/' base path for production builds (GitHub Pages)
   // Use '/' for local development

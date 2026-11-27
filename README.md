@@ -61,6 +61,8 @@ This starts a local PeerJS signaling server on port 9000. The game automatically
 - **Localhost** → Uses local PeerJS server (localhost:9000)
 - **GitHub Pages** → Uses PeerJS cloud service (cloud.peerjs.com)
 
+**TURN relay fallback:** No TURN credentials are shipped in the client. To enable a relay for players whose direct connection fails, set `VITE_TURN_CREDENTIALS_URL` at build time to an endpoint on your own backend that returns short-lived credentials as `{ "iceServers": [{ "urls", "username", "credential" }] }`. The URL is public, so it must not contain an API key (the build refuses URLs that look like they do). Without it, only STUN is used.
+
 ### Development Commands
 
 - `npm run dev` - Start development server with hot reload
