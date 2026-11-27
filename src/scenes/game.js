@@ -49,7 +49,7 @@ import { createMinimap } from '../systems/minimap.js';
 import { renderFloorDecorations, getFloorTheme } from '../systems/floorTheming.js';
 import { POWERUP_WEAPONS, rollPowerupDrop, applyPowerupWeapon, getPowerupDisplay, updatePowerupWeapon, restoreOriginalWeapon } from '../systems/powerupWeapons.js';
 import { getParty, getPartySize } from '../systems/partySystem.js';
-import { initMultiplayerGame, registerPlayer, registerEnemy, updateMultiplayer, isMultiplayerActive, cleanupMultiplayer, getPlayerCount, getRoomRNG, getFloorRNG, setCurrentFloor, setCurrentRoom, broadcastGameSeed, isHost, broadcastPauseState, sendPauseRequest, broadcastDeathEvent, broadcastRoomCompletion, broadcastGameOver, broadcastXPGain, broadcastCurrencyGain, broadcastPlayerDeath, broadcastRoomTransition, sendEnemyDeath, broadcastPowerupWeaponApplied, broadcastLevelUpQueued, broadcastHostQuit, getAndClearPendingXP, broadcastEmote, getFirstRoomTemplateKey, hasGameSeed, onGameSeedReceived, broadcastObstacles, broadcastHealEvent, broadcastRevivalEvent } from '../systems/multiplayerGame.js';
+import { initMultiplayerGame, registerPlayer, registerEnemy, updateMultiplayer, isMultiplayerActive, cleanupMultiplayer, getPlayerCount, getRoomRNG, getFloorRNG, setCurrentFloor, setCurrentRoom, broadcastGameSeed, isHost, broadcastPauseState, sendPauseRequest, broadcastDeathEvent, broadcastRoomCompletion, broadcastGameOver, broadcastXPGain, broadcastCurrencyGain, broadcastPlayerDeath, broadcastRoomTransition, sendEnemyDeath, broadcastPowerupWeaponApplied, broadcastLevelUpQueued, broadcastHostQuit, getAndClearPendingXP, broadcastEmote, getFirstRoomTemplateKey, hasGameSeed, onGameSeedReceived, broadcastObstacles, broadcastHealEvent, broadcastRevivalEvent, takeHostSpawnBudget } from '../systems/multiplayerGame.js';
 import { onMessage, offMessage, getNetworkInfo, broadcast } from '../systems/networkSystem.js';
 import { initInputSystem, initTouchControls } from '../systems/inputSystem.js';
 
@@ -1039,13 +1039,18 @@ export function setupGameScene(k) {
 
                 // Listen for obstacle data from host
                 onMessage('obstacle_data', (data) => {
-                    console.log('[Multiplayer] Client received obstacle data:', data.obstacles.length, 'obstacles');
+                    const obstacleList = data && data.obstacles;
+                    if (!Array.isArray(obstacleList) || !takeHostSpawnBudget('obstacles', obstacleList.length)) {
+                        console.warn('[Multiplayer] Ignoring obstacle data over the obstacle limit');
+                        return;
+                    }
+                    console.log('[Multiplayer] Client received obstacle data:', obstacleList.length, 'obstacles');
 
                     // Clear any existing obstacles (in case of resync)
                     k.get('obstacle').forEach(obj => k.destroy(obj));
 
                     // Create obstacles from host data
-                    data.obstacles.forEach(obsData => {
+                    obstacleList.forEach(obsData => {
                         // Color comes as array, convert to k.rgb()
                         const color = Array.isArray(obsData.color)
                             ? k.rgb(obsData.color[0], obsData.color[1], obsData.color[2])
@@ -1193,7 +1198,7 @@ export function setupGameScene(k) {
                 // Handle player dodge events from host
                 onMessage('player_dodged', (data) => {
                     const dodgingPlayer = players.find(p => p.slotIndex === data.slotIndex);
-                    if (dodgingPlayer && dodgingPlayer.exists()) {
+                    if (dodgingPlayer && dodgingPlayer.exists() && takeHostSpawnBudget('effects')) {
                         // Show dodge visual feedback
                         const dodgeText = k.add([
                             k.text('DODGE!', { size: 14 }),
@@ -1324,7 +1329,7 @@ export function setupGameScene(k) {
             onMessage('player_emote', (data) => {
                 // Find the player who sent the emote
                 const emotingPlayer = players[data.slotIndex];
-                if (emotingPlayer && emotingPlayer.exists()) {
+                if (emotingPlayer && emotingPlayer.exists() && takeHostSpawnBudget('effects')) {
                     showEmote(emotingPlayer, data.emoteType);
                 }
             });
