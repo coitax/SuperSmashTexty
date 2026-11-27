@@ -129,6 +129,11 @@ export function createXPPickup(k, x, y, value) {
 // Currency icons for different types of money
 const CURRENCY_ICONS = ['$', '€', '¥', '£', '₹', '₽', '₩', '₪'];
 
+// Value of each room-reward currency pickup; also the most any single currency pickup is worth
+export function getRoomRewardCurrencyValue(floor) {
+    return Math.floor(1 + floor * 0.3);
+}
+
 // Get a random currency icon
 export function getRandomCurrencyIcon() {
     return CURRENCY_ICONS[Math.floor(Math.random() * CURRENCY_ICONS.length)];

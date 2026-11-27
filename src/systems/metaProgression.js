@@ -97,11 +97,20 @@ export function getSaveData() {
     return loadSave();
 }
 
+// Non-negative whole number, or 0 for anything else (negative, NaN, Infinity, non-numbers)
+function toCount(value) {
+    return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+}
+
 // Add currency to save
 export function addCurrency(amount) {
     const save = loadSave();
+    const credits = toCount(amount);
+    if (credits === 0) {
+        return save.currency;
+    }
     // Cap currency at Number.MAX_SAFE_INTEGER to prevent overflow
-    save.currency = Math.min(Number.MAX_SAFE_INTEGER, save.currency + amount);
+    save.currency = Math.min(Number.MAX_SAFE_INTEGER, save.currency + credits);
     saveGame(save);
     return save.currency;
 }
@@ -474,21 +483,25 @@ export function refundAllPermanentUpgrades() {
 // Update run statistics
 export function updateRunStats(runStats) {
     const save = loadSave();
+    const floorsReached = toCount(runStats.floorsReached);
+    const roomsCleared = toCount(runStats.roomsCleared);
+    const level = toCount(runStats.level);
+
     save.stats.totalRuns++;
-    save.stats.totalFloorsReached += runStats.floorsReached || 0;
-    save.stats.totalRoomsCleared += runStats.roomsCleared || 0;
-    save.stats.totalEnemiesKilled += runStats.enemiesKilled || 0;
-    save.stats.totalBossesKilled += runStats.bossesKilled || 0;
-    save.stats.totalCurrencyEarned += runStats.currencyEarned || 0;
+    save.stats.totalFloorsReached += floorsReached;
+    save.stats.totalRoomsCleared += roomsCleared;
+    save.stats.totalEnemiesKilled += toCount(runStats.enemiesKilled);
+    save.stats.totalBossesKilled += toCount(runStats.bossesKilled);
+    save.stats.totalCurrencyEarned += toCount(runStats.currencyEarned);
     
-    if (runStats.floorsReached > save.stats.bestFloor) {
-        save.stats.bestFloor = runStats.floorsReached;
+    if (floorsReached > save.stats.bestFloor) {
+        save.stats.bestFloor = floorsReached;
     }
-    if (runStats.roomsCleared > save.stats.bestRoom) {
-        save.stats.bestRoom = runStats.roomsCleared;
+    if (roomsCleared > save.stats.bestRoom) {
+        save.stats.bestRoom = roomsCleared;
     }
-    if (runStats.level > save.stats.bestLevel) {
-        save.stats.bestLevel = runStats.level || 1;
+    if (level > save.stats.bestLevel) {
+        save.stats.bestLevel = level;
     }
     
     saveGame(save);

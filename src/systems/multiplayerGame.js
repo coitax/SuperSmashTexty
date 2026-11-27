@@ -7,7 +7,7 @@ import { getParty, getPartySize, getLocalPlayer, clearPartyCallbacks } from './p
 import { broadcast, sendToHost, sendToPeer, onMessage, offMessage, getNetworkInfo } from './networkSystem.js';
 import { createEnemy } from '../entities/enemy.js';
 import { createBoss } from '../entities/boss.js';
-import { createXPPickup, createCurrencyPickup, getRandomCurrencyIcon } from '../entities/pickup.js';
+import { createXPPickup, createCurrencyPickup, getRandomCurrencyIcon, getRoomRewardCurrencyValue } from '../entities/pickup.js';
 import { SeededRandom, createSeed } from '../utils/seededRandom.js';
 import { initConnectionQuality } from './connectionQuality.js';
 import { applyUpgrade, recalculateAllUpgrades } from './upgrades.js';
@@ -34,6 +34,7 @@ const mpGame = {
     enemies: new Map(), // Map of entityId -> enemy entity
     projectiles: new Map(), // Map of entityId -> projectile entity
     pickups: new Map(), // Map of entityId -> pickup entity
+    creditablePickups: new Map(), // Client: currency pickup entityId -> value to credit (0 once credited)
     nextEntityId: 1, // Auto-incrementing ID for entities
     // Kaplay instance reference
     k: null,
@@ -70,6 +71,7 @@ export function initMultiplayerGame(isHost, localSlot = 0, kaplayInstance = null
     mpGame.enemies.clear();
     mpGame.projectiles.clear();
     mpGame.pickups.clear();
+    mpGame.creditablePickups.clear();
     mpGame.nextEntityId = 1;
 
     // Initialize seeded RNG
@@ -622,6 +624,12 @@ function setupClientHandlers() {
             pickup.mpEntityId = payload.id;
             pickup.pickupType = 'currency';
             mpGame.pickups.set(payload.id, pickup);
+
+            const maxValue = getRoomRewardCurrencyValue(mpGame.currentFloor);
+            if (Number.isInteger(payload.value) && payload.value > 0 && payload.value <= maxValue &&
+                !mpGame.creditablePickups.has(payload.id)) {
+                mpGame.creditablePickups.set(payload.id, payload.value);
+            }
             // Removed console.log for performance
         }
     });
@@ -849,10 +857,15 @@ function setupClientHandlers() {
         }
     });
 
-    // Receive currency gain from host
+    // Receive currency gain from host. The host's amount is ignored: only a currency pickup
+    // this client saw spawn is credited, at its validated spawn value, and only once.
     onMessage('currency_gain', (payload) => {
-        if (MP_DEBUG) console.log('[Multiplayer] Received currency gain from host:', payload.value);
-        addCurrency(payload.value);
+        if (MP_DEBUG) console.log('[Multiplayer] Received currency gain from host:', payload?.value);
+        const entityId = payload?.entityId;
+        const value = mpGame.creditablePickups.get(entityId);
+        if (!value) return;
+        mpGame.creditablePickups.set(entityId, 0);
+        addCurrency(value);
     });
 
     // Receive enemy split events from host
@@ -1358,6 +1371,7 @@ export function cleanupMultiplayer() {
     mpGame.enemies.clear();
     mpGame.projectiles.clear();
     mpGame.pickups.clear();
+    mpGame.creditablePickups.clear();
 
     // Reset entity ID counter
     mpGame.nextEntityId = 1;
@@ -1950,10 +1964,10 @@ export function broadcastXPGain(xpValue) {
  * Broadcast currency gain to all clients (host only)
  * Called when currency is collected so all players gain currency
  */
-export function broadcastCurrencyGain(currencyValue) {
+export function broadcastCurrencyGain(currencyValue, entityId) {
     if (!mpGame.isHost) return;
 
-    broadcast('currency_gain', { value: currencyValue });
+    broadcast('currency_gain', { value: currencyValue, entityId });
 }
 
 /**

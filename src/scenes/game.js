@@ -18,7 +18,7 @@ import { createPlayer } from '../entities/player.js';
 import { createEnemy } from '../entities/enemy.js';
 import { createBoss, createTwinGuardians } from '../entities/boss.js';
 import { createMiniboss } from '../entities/miniboss.js';
-import { createXPPickup, createCurrencyPickup, getRandomCurrencyIcon, createPowerupWeaponPickup } from '../entities/pickup.js';
+import { createXPPickup, createCurrencyPickup, getRandomCurrencyIcon, getRoomRewardCurrencyValue, createPowerupWeaponPickup } from '../entities/pickup.js';
 import { createDoor } from '../entities/door.js';
 import { createObstacle } from '../entities/obstacle.js';
 import { createProjectile } from '../entities/projectile.js';
@@ -957,8 +957,9 @@ export function setupGameScene(k) {
                         console.log('[Multiplayer] Client received room template:', data.roomTemplateKey);
                     }
 
-                    // Sync floor number - check if we're advancing to a new floor
-                    if (data.currentFloor && data.currentFloor !== gameState.currentFloor) {
+                    // Sync floor number - the host only ever advances one floor per transition,
+                    // and the client's floor feeds its saved run stats, so accept nothing else
+                    if (data.currentFloor === gameState.currentFloor + 1) {
                         console.log(`[Multiplayer] Floor advancement: ${gameState.currentFloor} -> ${data.currentFloor}`);
                         gameState.currentFloor = data.currentFloor;
                         // Clear floor map so it regenerates for the new floor
@@ -983,7 +984,9 @@ export function setupGameScene(k) {
                 });
 
                 onMessage('room_completed', () => {
+                    if (roomCompleted) return;
                     roomCompleted = true;
+                    runStats.roomsCleared++;
 
                     // Revive all dead players (same as host)
                     reviveAllPlayers();
@@ -1080,14 +1083,13 @@ export function setupGameScene(k) {
 
                 // Listen for game over event from host
                 onMessage('game_over', (data) => {
-                    // Calculate currency earned (use host's value if provided)
-                    const currencyEarned = data.currencyEarned || calculateCurrencyEarned(data.runStats || runStats);
+                    // The host's run summary, currency, and our XP level (driven by host xp_gain
+                    // messages) are unverifiable, so only what this client observed is saved.
+                    const observedRunStats = { ...runStats };
+                    const currencyEarned = calculateCurrencyEarned(observedRunStats);
 
-                    // Update persistent stats and add currency
-                    // Use runStats from host (data.runStats) instead of local runStats (which is empty for clients)
                     const fullRunStats = {
-                        ...(data.runStats || runStats),
-                        level: player.level,
+                        ...observedRunStats,
                         currencyEarned: currencyEarned
                     };
                     updateRunStats(fullRunStats);
@@ -1101,9 +1103,9 @@ export function setupGameScene(k) {
 
                     // Go to game over scene
                     k.go('gameOver', {
-                        runStats: { ...(data.runStats || runStats) },
+                        runStats: observedRunStats,
                         currencyEarned: currencyEarned,
-                        partyStats: data.partyStats || [],
+                        partyStats: Array.isArray(data?.partyStats) ? data.partyStats : [],
                         isDailyRun: gameState.isDailyRun,
                         dailyCharacter: gameState.dailyCharacter
                     });
@@ -4033,7 +4035,7 @@ export function setupGameScene(k) {
 
                     // Broadcast currency gain to clients
                     if (isMultiplayerActive()) {
-                        broadcastCurrencyGain(pickup.value);
+                        broadcastCurrencyGain(pickup.value, pickup.mpEntityId);
                     }
 
                     pickup.isFlyingToUI = true;
@@ -4414,7 +4416,7 @@ export function setupGameScene(k) {
                 const y = centerY + Math.sin(angle) * distance;
 
                 // Each currency pickup is worth more on higher floors
-                const currencyValue = Math.floor(1 + currentFloor * 0.3);
+                const currencyValue = getRoomRewardCurrencyValue(currentFloor);
                 const icon = getRandomCurrencyIcon();
                 // Note: createCurrencyPickup handles multiplayer registration internally
                 const currencyPickup = createCurrencyPickup(k, x, y, currencyValue, icon);
