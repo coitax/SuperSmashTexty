@@ -100,8 +100,12 @@ export function getSaveData() {
 // Add currency to save
 export function addCurrency(amount) {
     const save = loadSave();
-    // Cap currency at Number.MAX_SAFE_INTEGER to prevent overflow
-    save.currency = Math.min(Number.MAX_SAFE_INTEGER, save.currency + amount);
+    if (typeof amount !== 'number' || !Number.isFinite(amount)) {
+        return save.currency;
+    }
+    const current = Number.isFinite(save.currency) ? save.currency : 0;
+    // Keep currency within [0, Number.MAX_SAFE_INTEGER]
+    save.currency = Math.max(0, Math.min(Number.MAX_SAFE_INTEGER, current + amount));
     saveGame(save);
     return save.currency;
 }
