@@ -18,6 +18,21 @@ import {
 } from './networkSystem.js';
 import { sendInitialGameState, handlePlayerDisconnect as cleanupDisconnectedPlayer } from './multiplayerGame.js';
 import { onPlayerJoinedParty } from './matchmakingSystem.js';
+import {
+    sanitizePlayerName,
+    sanitizePlayerLevel,
+    sanitizeCharacterKey,
+    sanitizePortraitId,
+    sanitizeInviteCode,
+    sanitizeEmoteType,
+    sanitizePermanentUpgradeLevels,
+    sanitizeRemoteSlot,
+    sanitizeProfileData
+} from './partyFields.js';
+
+function asObject(payload) {
+    return payload !== null && typeof payload === 'object' ? payload : {};
+}
 
 // Party state
 const party = {
@@ -130,28 +145,28 @@ export function setupNetworkHandlers() {
     partyHostHandlersRegistered = true;
 
     // Handle join requests from clients
-    onMessage('join_request', (payload, fromPeerId) => {
-        console.log('[PartySystem] Join request from:', fromPeerId);
-        console.log('[PartySystem] Payload:', {
-            playerName: payload.playerName,
-            inviteCode: payload.inviteCode,
-            selectedCharacter: payload.selectedCharacter
-        });
+    onMessage('join_request', (rawPayload, fromPeerId) => {
+        const payload = asObject(rawPayload);
+        const playerName = sanitizePlayerName(payload.playerName);
+        const inviteCode = sanitizeInviteCode(payload.inviteCode);
+        const selectedCharacter = sanitizeCharacterKey(payload.selectedCharacter);
 
-        // Validate payload has required data
-        if (!payload.playerName) {
-            console.warn('[PartySystem] Join request missing playerName, using default');
+        console.log('[PartySystem] Join request from:', fromPeerId);
+        console.log('[PartySystem] Payload:', { playerName, inviteCode, selectedCharacter });
+
+        if (!playerName) {
+            console.warn('[PartySystem] Join request missing a valid playerName, using default');
         }
 
         // Add player to party
         const slotIndex = addPlayerToPartyFromNetwork(
-            payload.playerName || 'Player',
-            payload.inviteCode || '000000',
-            payload.selectedCharacter || 'survivor',
-            payload.selectedPortrait || 'default',
+            playerName || 'Player',
+            inviteCode || '000000',
+            selectedCharacter || 'survivor',
+            sanitizePortraitId(payload.selectedPortrait) || 'default',
             fromPeerId,
-            payload.permanentUpgradeLevels || null,
-            payload.playerLevel || 1
+            sanitizePermanentUpgradeLevels(payload.permanentUpgradeLevels),
+            sanitizePlayerLevel(payload.playerLevel) || 1
         );
 
         if (slotIndex !== null) {
@@ -201,8 +216,9 @@ export function setupNetworkHandlers() {
     onMessage('player_info', (payload, fromPeerId) => {
         const slotIndex = party.peerIdToSlot.get(fromPeerId);
         if (slotIndex !== undefined) {
-            if (payload.playerName) {
-                party.slots[slotIndex].playerName = payload.playerName;
+            const playerName = sanitizePlayerName(asObject(payload).playerName);
+            if (playerName) {
+                party.slots[slotIndex].playerName = playerName;
             }
             broadcastPartyUpdate();
         }
@@ -211,9 +227,10 @@ export function setupNetworkHandlers() {
     // Handle character changes from clients
     onMessage('character_change', (payload, fromPeerId) => {
         const slotIndex = party.peerIdToSlot.get(fromPeerId);
-        if (slotIndex !== undefined) {
-            console.log(`[PartySystem] Player in slot ${slotIndex} changed character to:`, payload.selectedCharacter);
-            party.slots[slotIndex].selectedCharacter = payload.selectedCharacter;
+        const selectedCharacter = sanitizeCharacterKey(asObject(payload).selectedCharacter);
+        if (slotIndex !== undefined && selectedCharacter) {
+            console.log(`[PartySystem] Player in slot ${slotIndex} changed character to:`, selectedCharacter);
+            party.slots[slotIndex].selectedCharacter = selectedCharacter;
             broadcastPartyUpdate();
         }
     });
@@ -222,8 +239,9 @@ export function setupNetworkHandlers() {
     onMessage('ready_change', (payload, fromPeerId) => {
         const slotIndex = party.peerIdToSlot.get(fromPeerId);
         if (slotIndex !== undefined) {
-            console.log(`[PartySystem] Player in slot ${slotIndex} ready state:`, payload.isReady);
-            party.slots[slotIndex].isReady = payload.isReady;
+            const isReady = asObject(payload).isReady === true;
+            console.log(`[PartySystem] Player in slot ${slotIndex} ready state:`, isReady);
+            party.slots[slotIndex].isReady = isReady;
             broadcastPartyUpdate();
             // Check if all players are ready
             checkAllReady();
@@ -233,13 +251,14 @@ export function setupNetworkHandlers() {
     // Handle party emotes from clients - rebroadcast to all
     onMessage('party_emote', (payload, fromPeerId) => {
         const slotIndex = party.peerIdToSlot.get(fromPeerId);
-        if (slotIndex !== undefined) {
-            // Set the slot index from the verified peer
-            payload.slotIndex = slotIndex;
+        const emoteType = sanitizeEmoteType(asObject(payload).emoteType);
+        if (slotIndex !== undefined && emoteType) {
+            // Slot index comes from the verified peer, not the payload
+            const emote = { slotIndex, emoteType };
             // Store emote and notify callbacks
-            handlePartyEmote(payload);
+            handlePartyEmote(emote);
             // Rebroadcast to all clients
-            broadcast('party_emote', payload);
+            broadcast('party_emote', emote);
         }
     });
 
@@ -265,13 +284,16 @@ export function setupNetworkHandlers() {
     onMessage('profile_response', (payload, fromPeerId) => {
         const slotIndex = party.peerIdToSlot.get(fromPeerId);
         if (slotIndex !== undefined) {
-            payload.slotIndex = slotIndex;
+            const { forwardTo, profileData } = asObject(payload);
+            const response = { slotIndex, profileData: sanitizeProfileData(profileData) };
             // Check if this is a forwarded response
-            if (payload.forwardTo) {
-                sendToPeer(payload.forwardTo, 'profile_response', payload);
+            if (forwardTo) {
+                if (typeof forwardTo === 'string' && party.peerIdToSlot.has(forwardTo)) {
+                    sendToPeer(forwardTo, 'profile_response', response);
+                }
             } else {
                 // This is for the host
-                handleProfileResponse(payload);
+                handleProfileResponse(response);
             }
         }
     });
@@ -528,20 +550,24 @@ function setupClientHandlers() {
 
     // Receive party state from host
     onMessage('party_sync', (payload) => {
+        const slots = sanitizeRemoteSlots(asObject(payload).slots);
+        if (!slots) return;
+        const yourSlotIndex = payload.yourSlotIndex;
+
         console.log('[PartySystem] Received party sync:', {
-            hostName: payload.slots[0].playerName,
-            hostCharacter: payload.slots[0].selectedCharacter,
-            yourSlot: payload.yourSlotIndex,
-            totalSlots: payload.slots.filter(s => s.playerId !== null).length
+            hostName: slots[0].playerName,
+            hostCharacter: slots[0].selectedCharacter,
+            yourSlot: yourSlotIndex,
+            totalSlots: slots.filter(s => s.playerId !== null).length
         });
 
         // Update our party state
-        party.slots = payload.slots;
+        party.slots = slots;
 
         // Mark our own slot as local
-        if (payload.yourSlotIndex !== undefined) {
-            party.slots[payload.yourSlotIndex].isLocal = true;
-            console.log(`[PartySystem] Marked slot ${payload.yourSlotIndex} as local`);
+        if (Number.isInteger(yourSlotIndex) && yourSlotIndex > 0 && yourSlotIndex < slots.length) {
+            party.slots[yourSlotIndex].isLocal = true;
+            console.log(`[PartySystem] Marked slot ${yourSlotIndex} as local`);
         }
 
         // Mark host's slot (slot 0) as remote
@@ -552,7 +578,7 @@ function setupClientHandlers() {
         console.log(`[PartySystem] Party synced successfully:`, {
             partySize,
             hostInSlot0: party.slots[0].playerName,
-            localSlot: payload.yourSlotIndex
+            localSlot: yourSlotIndex
         });
     });
 
@@ -590,11 +616,14 @@ function setupClientHandlers() {
 
     // Handle party update with ready states
     onMessage('party_update', (payload) => {
+        const slots = sanitizeRemoteSlots(asObject(payload).slots);
+        if (!slots) return;
+
         // Find which slot is local before updating
         const localSlotIndex = party.slots.findIndex(slot => slot.isLocal);
 
         // Update slots (includes ready states)
-        party.slots = payload.slots;
+        party.slots = slots;
 
         // Re-mark local slot (preserve isLocal flag)
         if (localSlotIndex !== -1) {
@@ -604,7 +633,10 @@ function setupClientHandlers() {
 
     // Handle party emotes from host
     onMessage('party_emote', (payload) => {
-        handlePartyEmote(payload);
+        const { slotIndex, emoteType } = asObject(payload);
+        if (Number.isInteger(slotIndex) && slotIndex >= 0 && slotIndex < party.maxSlots && sanitizeEmoteType(emoteType)) {
+            handlePartyEmote({ slotIndex, emoteType });
+        }
     });
 
     // Handle profile request (forwarded from host or direct from host)
@@ -637,6 +669,18 @@ function setupClientHandlers() {
             }
         }
     });
+}
+
+/**
+ * Rebuild the slot list received from the host
+ * @returns {Array|null} Sanitized slots, or null if the list is malformed
+ */
+function sanitizeRemoteSlots(slots) {
+    if (!Array.isArray(slots) || slots.length !== party.maxSlots) {
+        console.warn('[PartySystem] Ignoring malformed party slot list from host');
+        return null;
+    }
+    return slots.map(sanitizeRemoteSlot);
 }
 
 /**
@@ -875,12 +919,12 @@ export function getPartyDisplayInfo() {
     return party.slots.map((slot, index) => ({
         slotNumber: index + 1,
         isEmpty: slot.playerId === null,
-        playerName: slot.playerName || 'Empty Slot',
+        playerName: sanitizePlayerName(slot.playerName) || 'Empty Slot',
         isLocal: slot.isLocal,
         inviteCode: slot.inviteCode,
-        selectedCharacter: slot.selectedCharacter || 'survivor',
-        selectedPortrait: slot.selectedPortrait || 'default',
-        playerLevel: slot.playerLevel || 1,
+        selectedCharacter: sanitizeCharacterKey(slot.selectedCharacter) || 'survivor',
+        selectedPortrait: sanitizePortraitId(slot.selectedPortrait) || 'default',
+        playerLevel: sanitizePlayerLevel(slot.playerLevel) || 1,
         isReady: slot.isReady || false,
         isDisconnected: slot.isDisconnected || false
     }));
@@ -1259,11 +1303,11 @@ function handleProfileRequest(payload, fromPeerId = null) {
  * @param {Object} payload - Response payload with slotIndex and profileData
  */
 function handleProfileResponse(payload) {
-    const { slotIndex, profileData } = payload;
+    const { slotIndex, profileData } = asObject(payload);
 
     const callback = profileRequestCallbacks.get(slotIndex);
     if (callback) {
         profileRequestCallbacks.delete(slotIndex);
-        callback(profileData);
+        callback(sanitizeProfileData(profileData));
     }
 }
