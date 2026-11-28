@@ -17,8 +17,8 @@ import {
     query,
     orderByChild
 } from 'firebase/database';
-import { getPlayerName, getInviteCode } from './metaProgression.js';
-import { joinPartyAsClient, getParty, getPartySize, isPartyFull } from './partySystem.js';
+import { getPlayerName, getInviteCode, markInviteCodeShared } from './metaProgression.js';
+import { joinPartyAsClient, getParty, getPartySize, isPartyFull, refreshInviteCodeIfIdle } from './partySystem.js';
 
 // Firebase configuration
 const firebaseConfig = {
@@ -124,6 +124,8 @@ export async function startMatchmaking(callbacks = {}) {
         const queueRef = ref(database, 'matchmaking/queue');
         queueEntryRef = push(queueRef);
 
+        // Every other searcher can read this entry
+        markInviteCodeShared();
         await set(queueEntryRef, {
             inviteCode: inviteCode,
             playerName: playerName,
@@ -212,6 +214,7 @@ export async function startMatchmaking(callbacks = {}) {
         isSearching = false;
         callbacks.onError?.(err.message);
         callbacks.onSearchEnd?.();
+        refreshInviteCodeIfIdle();
         return false;
     }
 }
@@ -254,6 +257,11 @@ export function stopMatchmaking(notifyEnd = true) {
     }
 
     isStoppingMatchmaking = false;
+
+    // A cancelled search leaves our code in the queue; stop hosting on it
+    if (notifyEnd) {
+        refreshInviteCodeIfIdle();
+    }
 }
 
 /**

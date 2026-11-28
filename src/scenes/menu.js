@@ -536,15 +536,16 @@ export function setupMenuScene(k) {
             k.z(UI_Z_LAYERS.UI_TEXT)
         ]);
 
-        let hasValidCode = inviteCode !== 'OFFLINE';
+        // The code can change while the menu is open (it is rotated after a session ends)
+        let inviteCodeCheckTimer = 0;
         inviteCodeDisplay.onUpdate(() => {
-            if (!hasValidCode) {
-                const currentCode = getDisplayInviteCode();
-                if (currentCode && currentCode !== 'OFFLINE') {
-                    inviteCodeDisplay.text = currentCode;
-                    inviteCodeDisplay.color = k.rgb(...UI_COLORS.GOLD);
-                    hasValidCode = true;
-                }
+            inviteCodeCheckTimer -= k.dt();
+            if (inviteCodeCheckTimer > 0) return;
+            inviteCodeCheckTimer = 0.5;
+            const currentCode = getDisplayInviteCode();
+            if (currentCode && currentCode !== 'OFFLINE' && currentCode !== inviteCodeDisplay.text) {
+                inviteCodeDisplay.text = currentCode;
+                inviteCodeDisplay.color = k.rgb(...UI_COLORS.GOLD);
             }
         });
 

@@ -257,9 +257,22 @@ export function connectToHost(hostInviteCode) {
             }
         }, 30000);
 
+        // A host that is online answers the offer within a few seconds; only ICE
+        // negotiation after that answer needs the longer timeout above
+        const answerTimeout = setTimeout(() => {
+            if (isResolved || conn.open || conn.peerConnection?.remoteDescription) return;
+            isResolved = true;
+            clearTimeout(connectionTimeout);
+            connectionTimeout = null;
+            console.error('[NetworkSystem] Host did not answer - no one is hosting this invite code');
+            conn.close();
+            reject(new Error('Host not found - check invite code'));
+        }, 10000);
+
         conn.on('open', () => {
             isResolved = true;
             clearTimeout(connectionTimeout);
+            clearTimeout(answerTimeout);
             connectionTimeout = null; // Clear reference
             network.hostConnection = conn;
             network.hostId = hostPeerId;
@@ -278,6 +291,10 @@ export function connectToHost(hostInviteCode) {
                 clearTimeout(connectionTimeout);
                 connectionTimeout = null;
             }
+            clearTimeout(answerTimeout);
+
+            // A connection that never opened was a failed join, not a host leaving
+            if (network.hostConnection !== conn) return;
 
             network.hostConnection = null;
             network.hostId = null;
@@ -289,6 +306,7 @@ export function connectToHost(hostInviteCode) {
         conn.on('error', (err) => {
             isResolved = true;
             clearTimeout(connectionTimeout);
+            clearTimeout(answerTimeout);
             connectionTimeout = null; // Clear reference
             console.error('[NetworkSystem] Connection error:', err);
             console.error('[NetworkSystem] Error type:', err.type || 'unknown');
@@ -412,6 +430,27 @@ export function broadcast(type, payload, excludePeerIds = []) {
  * Disconnect from network
  */
 export function disconnect() {
+    destroyPeer();
+
+    // Clear handlers and callbacks to prevent memory leaks
+    network.messageHandlers.clear();
+    network.connectionCallbacks = [];
+}
+
+/**
+ * Re-register as host under a new invite code, keeping message handlers
+ * @param {string} inviteCode - New invite code to host on
+ * @returns {Promise<string>} Resolves with the invite code actually used
+ */
+export function restartHost(inviteCode) {
+    destroyPeer();
+    return initNetwork(inviteCode, true);
+}
+
+/**
+ * Close all connections and destroy the peer
+ */
+function destroyPeer() {
     // Close all connections
     if (network.isHost) {
         network.connections.forEach(conn => conn.close());
@@ -427,10 +466,6 @@ export function disconnect() {
         network.peer.destroy();
         network.peer = null;
     }
-
-    // Clear handlers and callbacks to prevent memory leaks
-    network.messageHandlers.clear();
-    network.connectionCallbacks = [];
 
     network.isInitialized = false;
     network.peerId = null;

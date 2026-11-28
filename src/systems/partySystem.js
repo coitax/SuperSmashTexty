@@ -3,9 +3,10 @@
  * Manages multiplayer party state and joining
  */
 
-import { getPlayerName, getInviteCode, getSelectedCharacter, setInviteCode, getPermanentUpgradeLevel, getSelectedPortrait, getPlayerLevel, getTotalXP, getSaveStats, getUnlockedAchievements, getUnlockedPortraits } from './metaProgression.js';
+import { getPlayerName, getInviteCode, getSelectedCharacter, setInviteCode, markInviteCodeShared, isInviteCodeShared, rotateInviteCode, getPermanentUpgradeLevel, getSelectedPortrait, getPlayerLevel, getTotalXP, getSaveStats, getUnlockedAchievements, getUnlockedPortraits } from './metaProgression.js';
 import {
     initNetwork,
+    restartHost,
     connectToHost,
     onMessage,
     onConnectionChange,
@@ -16,7 +17,7 @@ import {
     getNetworkInfo,
     disconnect
 } from './networkSystem.js';
-import { sendInitialGameState, handlePlayerDisconnect as cleanupDisconnectedPlayer } from './multiplayerGame.js';
+import { sendInitialGameState, handlePlayerDisconnect as cleanupDisconnectedPlayer, isMultiplayerActive } from './multiplayerGame.js';
 import { onPlayerJoinedParty } from './matchmakingSystem.js';
 
 // Party state
@@ -57,6 +58,11 @@ export async function initParty(k = null) {
     // Store kaplay instance for client game start
     if (k) {
         party.kaplayInstance = k;
+    }
+
+    // Never start hosting on a code that a previous session exposed
+    if (party.isHost && !party.networkInitialized && isInviteCodeShared()) {
+        rotateInviteCode();
     }
 
     // Only set local player info in slot 0 if we're the host
@@ -116,6 +122,31 @@ export async function initParty(k = null) {
             console.log('[PartySystem] Multiplayer disabled - running in single-player mode');
             // Continue anyway - single-player will still work
         }
+    } else {
+        await refreshInviteCodeIfIdle();
+    }
+}
+
+/**
+ * Host on a fresh invite code once a session that exposed the current one is over.
+ * Only runs while hosting alone outside a game, so no live connection is dropped.
+ */
+export async function refreshInviteCodeIfIdle() {
+    if (!party.isHost || !party.networkInitialized) return;
+    if (!isInviteCodeShared() || isMultiplayerActive()) return;
+    if (party.slots.some((slot, i) => i > 0 && slot.playerId !== null)) return;
+
+    const freshCode = rotateInviteCode();
+    party.slots[0].inviteCode = freshCode;
+    try {
+        const actualCode = await restartHost(freshCode);
+        if (actualCode !== freshCode) {
+            setInviteCode(actualCode);
+        }
+        party.slots[0].inviteCode = actualCode;
+    } catch (err) {
+        console.error('[PartySystem] Failed to re-host on a fresh invite code:', err);
+        party.networkInitialized = false;
     }
 }
 
@@ -134,7 +165,6 @@ export function setupNetworkHandlers() {
         console.log('[PartySystem] Join request from:', fromPeerId);
         console.log('[PartySystem] Payload:', {
             playerName: payload.playerName,
-            inviteCode: payload.inviteCode,
             selectedCharacter: payload.selectedCharacter
         });
 
@@ -146,7 +176,6 @@ export function setupNetworkHandlers() {
         // Add player to party
         const slotIndex = addPlayerToPartyFromNetwork(
             payload.playerName || 'Player',
-            payload.inviteCode || '000000',
             payload.selectedCharacter || 'survivor',
             payload.selectedPortrait || 'default',
             fromPeerId,
@@ -155,12 +184,13 @@ export function setupNetworkHandlers() {
         );
 
         if (slotIndex !== null) {
+            markInviteCodeShared();
+
             // Send party sync to the new player
             const partySyncData = {
                 slots: party.slots.map(slot => ({
                     playerId: slot.playerId,
                     playerName: slot.playerName,
-                    inviteCode: slot.inviteCode,
                     selectedCharacter: slot.selectedCharacter,
                     selectedPortrait: slot.selectedPortrait,
                     playerLevel: slot.playerLevel,
@@ -336,16 +366,14 @@ export function getDisplayInviteCode() {
 /**
  * Add player to party (when they join via code) - LEGACY, use joinPartyAsClient
  * @param {string} playerName - Player name
- * @param {string} inviteCode - Player invite code
  * @returns {number|null} Slot index if successful, null if party full
  */
-export function addPlayerToParty(playerName, inviteCode) {
+export function addPlayerToParty(playerName) {
     // Find first empty slot
     for (let i = 1; i < party.slots.length; i++) {
         if (party.slots[i].playerId === null) {
             party.slots[i].playerId = `player_${Date.now()}_${i}`;
             party.slots[i].playerName = playerName;
-            party.slots[i].inviteCode = inviteCode;
             return i;
         }
     }
@@ -355,18 +383,17 @@ export function addPlayerToParty(playerName, inviteCode) {
 /**
  * Add player to party from network (host only)
  * @param {string} playerName - Player name
- * @param {string} inviteCode - Player invite code
  * @param {string} selectedCharacter - Player's selected character key
  * @param {string} peerId - Peer ID of the joining player
  * @returns {number|null} Slot index if successful, null if party full
  */
-function addPlayerToPartyFromNetwork(playerName, inviteCode, selectedCharacter, selectedPortrait, peerId, permanentUpgradeLevels = null, playerLevel = 1) {
+function addPlayerToPartyFromNetwork(playerName, selectedCharacter, selectedPortrait, peerId, permanentUpgradeLevels = null, playerLevel = 1) {
     // Find first empty slot
     for (let i = 1; i < party.slots.length; i++) {
         if (party.slots[i].playerId === null) {
             party.slots[i].playerId = `player_${Date.now()}_${i}`;
             party.slots[i].playerName = playerName;
-            party.slots[i].inviteCode = inviteCode;
+            party.slots[i].inviteCode = null;
             party.slots[i].selectedCharacter = selectedCharacter;
             party.slots[i].selectedPortrait = selectedPortrait;
             party.slots[i].playerLevel = playerLevel;
@@ -435,11 +462,11 @@ export async function joinPartyAsClient(hostInviteCode) {
 
         // Connect to host
         await connectToHost(hostInviteCode);
+        markInviteCodeShared();
 
         // Send our player info including selected character, portrait, and permanent upgrades
         sendToHost('join_request', {
             playerName: savedLocalPlayer.playerName,
-            inviteCode: savedLocalPlayer.inviteCode,
             selectedCharacter: savedLocalPlayer.selectedCharacter,
             selectedPortrait: getSelectedPortrait() || 'default',
             playerLevel: getPlayerLevel(),
@@ -472,12 +499,12 @@ export function restoreLocalPlayerToSoloParty(playerInfo) {
     // Disconnect network if still trying to connect as client
     if (party.networkInitialized && !party.isHost) {
         disconnect();
+        party.networkInitialized = false;
     }
 
     // Reset to host state
     party.isHost = true;
     party.hostInviteCode = null;
-    party.networkInitialized = false;
 
     // Reset handler registration flags to allow re-registration
     partyHostHandlersRegistered = false;
@@ -649,7 +676,6 @@ function broadcastPartyUpdate() {
         slots: party.slots.map(slot => ({
             playerId: slot.playerId,
             playerName: slot.playerName,
-            inviteCode: slot.inviteCode,
             selectedCharacter: slot.selectedCharacter,
             selectedPortrait: slot.selectedPortrait,
             permanentUpgradeLevels: slot.permanentUpgradeLevels,
@@ -728,6 +754,8 @@ function finalizeDisconnect(slotIndex) {
     // Broadcast final removal
     broadcast('player_removed', { slotIndex: slotIndex });
     broadcastPartyUpdate();
+
+    refreshInviteCodeIfIdle();
 }
 
 /**
