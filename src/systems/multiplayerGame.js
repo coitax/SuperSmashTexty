@@ -15,6 +15,7 @@ import { createProjectile } from '../entities/projectile.js';
 import { getPermanentUpgradeLevel, addCurrency } from './metaProgression.js';
 import { ACHIEVEMENTS } from '../data/achievements.js';
 import { showMultiplayerAchievementToast, initToastSystem } from './toastNotifications.js';
+import { sanitizePlayerName, sanitizeAchievementId } from './partyFields.js';
 
 // Debug flag - set to true to enable verbose multiplayer logging
 const MP_DEBUG = false;
@@ -280,11 +281,16 @@ function setupHostHandlers() {
     onMessage('achievement_unlocked', (payload, fromPeerId) => {
         if (MP_DEBUG) console.log('[Multiplayer] Received achievement unlock from client:', fromPeerId, 'achievement:', payload.achievementId);
 
+        const achievementId = sanitizeAchievementId(payload?.achievementId);
+        const party = getParty();
+        const playerSlotIndex = party.peerIdToSlot.get(fromPeerId);
+        if (!achievementId || playerSlotIndex === undefined) return;
+
         // Broadcast to ALL clients so everyone can show the toast
         broadcast('achievement_unlocked', {
-            achievementId: payload.achievementId,
-            playerSlotIndex: payload.playerSlotIndex,
-            playerName: payload.playerName
+            achievementId,
+            playerSlotIndex,
+            playerName: sanitizePlayerName(party.slots[playerSlotIndex]?.playerName) || `Player ${playerSlotIndex + 1}`
         });
     });
 }
@@ -928,11 +934,12 @@ function setupClientHandlers() {
         if (payload.playerSlotIndex !== mpGame.localPlayerSlot) {
             if (MP_DEBUG) console.log('[Multiplayer] Achievement unlocked by player:', payload.playerName, 'achievement:', payload.achievementId);
 
-            const achievement = ACHIEVEMENTS[payload.achievementId];
+            const achievementId = sanitizeAchievementId(payload.achievementId);
+            const achievement = achievementId ? ACHIEVEMENTS[achievementId] : null;
             if (achievement && mpGame.k) {
                 // Make sure toast system is initialized
                 initToastSystem(mpGame.k);
-                showMultiplayerAchievementToast(payload.playerName, achievement);
+                showMultiplayerAchievementToast(sanitizePlayerName(payload.playerName) || 'Player', achievement);
             }
         }
     });
