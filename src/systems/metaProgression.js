@@ -14,6 +14,7 @@ const DEFAULT_SAVE = {
     currency: 0,
     playerName: null, // Will be generated on first load
     inviteCode: null, // Will be generated on first load
+    inviteCodeShared: false, // True once another player has seen or used inviteCode
     // Player XP/Level system (cosmetic prestige)
     totalXP: 0,
     playerLevel: 1,
@@ -630,6 +631,31 @@ export function getInviteCode() {
 export function setInviteCode(code) {
     const save = loadSave();
     save.inviteCode = code;
+    saveGame(save);
+    return save.inviteCode;
+}
+
+// Record that the current invite code has been exposed to other players
+export function markInviteCodeShared() {
+    const save = loadSave();
+    if (save.inviteCodeShared) return;
+    save.inviteCodeShared = true;
+    saveGame(save);
+}
+
+export function isInviteCodeShared() {
+    return loadSave().inviteCodeShared === true;
+}
+
+// Replace the invite code with a fresh one that no other player has seen
+export function rotateInviteCode() {
+    const save = loadSave();
+    let code = generateInviteCode();
+    while (code === save.inviteCode) {
+        code = generateInviteCode();
+    }
+    save.inviteCode = code;
+    save.inviteCodeShared = false;
     saveGame(save);
     return save.inviteCode;
 }
